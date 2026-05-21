@@ -136,6 +136,11 @@ describe('Installer targets — contract', () => {
               delete seed.mcpServers;
               seed.mcp = { other: { type: 'local', command: ['x'], enabled: true } };
             }
+            // copilot-vscode uses top-level `servers` (VS Code MCP shape).
+            if (target.id === 'copilot-vscode') {
+              delete seed.mcpServers;
+              seed.servers = { other: { type: 'stdio', command: 'x' } };
+            }
             fs.writeFileSync(jsonPath, JSON.stringify(seed, null, 2) + '\n');
 
             target.install(location, { autoAllow: true });
@@ -144,6 +149,9 @@ describe('Installer targets — contract', () => {
             if (target.id === 'opencode') {
               expect(after.mcp.other).toBeDefined();
               expect(after.mcp.codegraph).toBeDefined();
+            } else if (target.id === 'copilot-vscode') {
+              expect(after.servers.other).toBeDefined();
+              expect(after.servers.codegraph).toBeDefined();
             } else {
               expect(after.mcpServers.other).toBeDefined();
               expect(after.mcpServers.codegraph).toBeDefined();
@@ -1085,6 +1093,235 @@ describe('Installer targets — partial-state idempotency', () => {
     const after = JSON.parse(fs.readFileSync(file, 'utf-8'));
     // Both events emptied → the whole `hooks` object is removed.
     expect(after.hooks).toBeUndefined();
+
+  // ============================================================
+  // Copilot VS Code — shape & quirks
+  // ============================================================
+
+  it('copilot-vscode: local install writes ./.vscode/mcp.json with top-level `servers` (not mcpServers)', () => {
+    const target = getTarget('copilot-vscode')!;
+    const result = target.install('local', { autoAllow: false });
+    const mcpPath = path.join(tmpCwd, '.vscode', 'mcp.json');
+    expect(fs.existsSync(mcpPath)).toBe(true);
+    expect(result.files.some((f) => f.path.endsWith('/.vscode/mcp.json'))).toBe(true);
+
+    const cfg = JSON.parse(fs.readFileSync(mcpPath, 'utf-8'));
+    expect(cfg.servers).toBeDefined();
+    expect(cfg.servers.codegraph).toBeDefined();
+    expect(cfg.mcpServers).toBeUndefined();
+  });
+
+  it('copilot-vscode: injects --path ${workspaceFolder} into args (cwd quirk defense)', () => {
+    const target = getTarget('copilot-vscode')!;
+    target.install('local', { autoAllow: false });
+    const cfg = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.vscode', 'mcp.json'), 'utf-8'));
+    const args: string[] = cfg.servers.codegraph.args;
+    expect(args).toEqual(['serve', '--mcp', '--path', '${workspaceFolder}']);
+  });
+
+  it('copilot-vscode: install writes ./.github/copilot-instructions.md with marker block', () => {
+    const target = getTarget('copilot-vscode')!;
+    target.install('local', { autoAllow: false });
+    const instr = path.join(tmpCwd, '.github', 'copilot-instructions.md');
+    expect(fs.existsSync(instr)).toBe(true);
+    const body = fs.readFileSync(instr, 'utf-8');
+    expect(body).toContain('<!-- CODEGRAPH_START -->');
+    expect(body).toContain('<!-- CODEGRAPH_END -->');
+    expect(body).toContain('codegraph_callers');
+  });
+
+  it('copilot-vscode: instructions are MCP-availability-conditional (not declarative)', () => {
+    // .github/copilot-instructions.md is read by surfaces beyond VS Code
+    // (GH.com Copilot Chat, code review, cloud agent). The template must
+    // not declare "this project HAS codegraph configured" — wording must
+    // gate on availability.
+    const target = getTarget('copilot-vscode')!;
+    target.install('local', { autoAllow: false });
+    const body = fs.readFileSync(path.join(tmpCwd, '.github', 'copilot-instructions.md'), 'utf-8');
+    expect(body).not.toMatch(/This project has a CodeGraph MCP server.*configured/);
+    expect(body).toMatch(/If a CodeGraph MCP server is wired/i);
+  });
+
+  it('copilot-vscode: preserves JSONC line and block comments through install + idempotent re-run', () => {
+    const target = getTarget('copilot-vscode')!;
+    const dir = path.join(tmpCwd, '.vscode');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'mcp.json');
+    const original = [
+      '{',
+      '  // top-level note about my mcp setup',
+      '  /* block comment',
+      '     describing inputs */',
+      '  "inputs": [',
+      '    { "id": "api-key", "type": "promptString" } // sensitive',
+      '  ]',
+      '}',
+      '',
+    ].join('\n');
+    fs.writeFileSync(file, original);
+
+    target.install('local', { autoAllow: false });
+    const afterInstall = fs.readFileSync(file, 'utf-8');
+    expect(afterInstall).toContain('// top-level note about my mcp setup');
+    expect(afterInstall).toContain('/* block comment');
+    expect(afterInstall).toContain('// sensitive');
+    expect(afterInstall).toContain('"codegraph"');
+    expect(afterInstall).toContain('"inputs"');
+
+    const second = target.install('local', { autoAllow: false });
+    const mcpEntry = second.files.find((f) => f.path.endsWith('mcp.json'))!;
+    expect(mcpEntry.action).toBe('unchanged');
+    expect(fs.readFileSync(file, 'utf-8')).toBe(afterInstall);
+  });
+
+  it('copilot-vscode: uninstall removes only servers.codegraph and the marker block; preserves siblings/comments', () => {
+    const target = getTarget('copilot-vscode')!;
+    const dir = path.join(tmpCwd, '.vscode');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'mcp.json');
+    fs.writeFileSync(file, [
+      '{',
+      '  // important comment',
+      '  "servers": {',
+      '    "other": { "type": "stdio", "command": "x" }',
+      '  }',
+      '}',
+      '',
+    ].join('\n'));
+
+    const instrDir = path.join(tmpCwd, '.github');
+    fs.mkdirSync(instrDir, { recursive: true });
+    fs.writeFileSync(path.join(instrDir, 'copilot-instructions.md'),
+      '# Project copilot rules\n\nAlways respond in Korean.\n');
+
+    target.install('local', { autoAllow: false });
+    target.uninstall('local');
+
+    const afterCfg = fs.readFileSync(file, 'utf-8');
+    expect(afterCfg).not.toContain('codegraph');
+    expect(afterCfg).toContain('// important comment');
+    expect(afterCfg).toContain('"other"');
+
+    const afterInstr = fs.readFileSync(path.join(instrDir, 'copilot-instructions.md'), 'utf-8');
+    expect(afterInstr).toContain('# Project copilot rules');
+    expect(afterInstr).toContain('Always respond in Korean.');
+    expect(afterInstr).not.toContain('CODEGRAPH_START');
+  });
+
+  it('copilot-vscode: global install is unsupported (returns notes, no files)', () => {
+    const target = getTarget('copilot-vscode')!;
+    expect(target.supportsLocation('global')).toBe(false);
+    const result = target.install('global', { autoAllow: false });
+    expect(result.files).toEqual([]);
+    expect(result.notes && result.notes.length).toBeGreaterThan(0);
+  });
+
+  it('copilot-vscode: printConfig works for both locations without writing anything', () => {
+    const target = getTarget('copilot-vscode')!;
+    const localSnippet = target.printConfig('local');
+    const globalSnippet = target.printConfig('global');
+    expect(localSnippet).toContain('servers');
+    expect(localSnippet).toContain('codegraph');
+    expect(globalSnippet).toContain('servers');
+    expect(globalSnippet).toContain('codegraph');
+    // Neither should have touched the filesystem.
+    expect(fs.existsSync(path.join(tmpCwd, '.vscode', 'mcp.json'))).toBe(false);
+  });
+
+  // ============================================================
+  // Copilot CLI — shape & quirks
+  // ============================================================
+
+  it('copilot-cli: global install writes ~/.copilot/mcp-config.json with mcpServers + tools allowlist', () => {
+    const target = getTarget('copilot-cli')!;
+    target.install('global', { autoAllow: false });
+    const file = path.join(tmpHome, '.copilot', 'mcp-config.json');
+    expect(fs.existsSync(file)).toBe(true);
+    const cfg = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    expect(cfg.mcpServers).toBeDefined();
+    expect(cfg.mcpServers.codegraph).toBeDefined();
+    expect(cfg.servers).toBeUndefined();
+
+    const entry = cfg.mcpServers.codegraph;
+    expect(entry.type).toBe('stdio');
+    expect(entry.command).toBe('codegraph');
+    expect(entry.args).toEqual(['serve', '--mcp']);
+    expect(Array.isArray(entry.tools)).toBe(true);
+    expect(entry.tools).toContain('codegraph_search');
+    expect(entry.tools).toContain('codegraph_explore');
+    expect(entry.tools).toContain('codegraph_status');
+    // All 9 documented codegraph tools should be enumerated.
+    expect(entry.tools.length).toBeGreaterThanOrEqual(9);
+  });
+
+  it('copilot-cli: respects COPILOT_HOME env var', () => {
+    const target = getTarget('copilot-cli')!;
+    const customHome = mkTmpDir('copilot-home');
+    const prevEnv = process.env.COPILOT_HOME;
+    process.env.COPILOT_HOME = customHome;
+    try {
+      target.install('global', { autoAllow: false });
+      expect(fs.existsSync(path.join(customHome, 'mcp-config.json'))).toBe(true);
+      // The default ~/.copilot/ location should NOT have been written to.
+      expect(fs.existsSync(path.join(tmpHome, '.copilot', 'mcp-config.json'))).toBe(false);
+    } finally {
+      if (prevEnv === undefined) delete process.env.COPILOT_HOME;
+      else process.env.COPILOT_HOME = prevEnv;
+      fs.rmSync(customHome, { recursive: true, force: true });
+    }
+  });
+
+  it('copilot-cli: writes ~/.copilot/copilot-instructions.md with marker block', () => {
+    const target = getTarget('copilot-cli')!;
+    target.install('global', { autoAllow: false });
+    const instr = path.join(tmpHome, '.copilot', 'copilot-instructions.md');
+    expect(fs.existsSync(instr)).toBe(true);
+    const body = fs.readFileSync(instr, 'utf-8');
+    expect(body).toContain('<!-- CODEGRAPH_START -->');
+    expect(body).toContain('codegraph_callers');
+  });
+
+  it('copilot-cli: install preserves a sibling mcpServers entry', () => {
+    const target = getTarget('copilot-cli')!;
+    const dir = path.join(tmpHome, '.copilot');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'mcp-config.json');
+    fs.writeFileSync(file, JSON.stringify({
+      mcpServers: { other: { type: 'stdio', command: 'x' } },
+    }, null, 2));
+
+    target.install('global', { autoAllow: false });
+
+    const cfg = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    expect(cfg.mcpServers.other).toBeDefined();
+    expect(cfg.mcpServers.codegraph).toBeDefined();
+  });
+
+  it('copilot-cli: uninstall strips only codegraph from mcpServers', () => {
+    const target = getTarget('copilot-cli')!;
+    const dir = path.join(tmpHome, '.copilot');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'mcp-config.json');
+    fs.writeFileSync(file, JSON.stringify({
+      mcpServers: {
+        codegraph: { command: 'codegraph' },
+        other: { command: 'x' },
+      },
+    }, null, 2));
+
+    target.uninstall('global');
+
+    const cfg = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    expect(cfg.mcpServers.codegraph).toBeUndefined();
+    expect(cfg.mcpServers.other).toBeDefined();
+  });
+
+  it('copilot-cli: local install is unsupported (global-only)', () => {
+    const target = getTarget('copilot-cli')!;
+    expect(target.supportsLocation('local')).toBe(false);
+    const result = target.install('local', { autoAllow: false });
+    expect(result.files).toEqual([]);
+    expect(result.notes && result.notes.length).toBeGreaterThan(0);
   });
 });
 
@@ -1098,6 +1335,8 @@ describe('Installer targets — registry', () => {
     expect(getTarget('gemini')?.id).toBe('gemini');
     expect(getTarget('antigravity')?.id).toBe('antigravity');
     expect(getTarget('kiro')?.id).toBe('kiro');
+    expect(getTarget('copilot-vscode')?.id).toBe('copilot-vscode');
+    expect(getTarget('copilot-cli')?.id).toBe('copilot-cli');
     expect(getTarget('not-a-real-target')).toBeUndefined();
   });
 
@@ -1106,6 +1345,8 @@ describe('Installer targets — registry', () => {
     expect(resolveTargetFlag('all', 'global').length).toBe(ALL_TARGETS.length);
     const csv = resolveTargetFlag('claude,cursor', 'global');
     expect(csv.map((t) => t.id)).toEqual(['claude', 'cursor']);
+    const copilotCsv = resolveTargetFlag('copilot-vscode,copilot-cli', 'local');
+    expect(copilotCsv.map((t) => t.id)).toEqual(['copilot-vscode', 'copilot-cli']);
   });
 
   it('resolveTargetFlag throws on unknown id', () => {
