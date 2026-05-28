@@ -115,13 +115,13 @@ export async function runInstallerWithOptions(opts: RunInstallerOptions): Promis
     }
     if (shouldInstallGlobally) {
       const s = clack.spinner();
-      s.start('Installing codegraph CLI...');
+      s.start('Linking codegraph CLI to PATH...');
       try {
-        execSync('npm install -g @colbymchenry/codegraph', { stdio: 'pipe', windowsHide: true });
-        s.stop('Installed codegraph CLI on PATH');
+        execSync('npm link', { stdio: 'pipe', cwd: path.join(__dirname, '..', '..') });
+        s.stop('Linked codegraph CLI on PATH (local build)');
       } catch {
-        s.stop('Could not install (permission denied)');
-        clack.log.warn('Try: sudo npm install -g @colbymchenry/codegraph');
+        s.stop('Could not link (permission denied)');
+        clack.log.warn('Try: cd ' + path.join(__dirname, '..', '..') + ' && sudo npm link');
       }
     } else {
       clack.log.info('Skipped CLI install — agents will not be able to launch the MCP server without it');
