@@ -38,25 +38,15 @@
 
 ## Get Started
 
-### 1. Install the CLI
-
-**No Node.js required** — one command grabs the right build for your OS:
-
 ```bash
-# macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.sh | sh
-
-# Windows (PowerShell)
-irm https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.ps1 | iex
+# From the root of your local clone:
+npm install
+npm run build
+node dist/bin/codegraph.js install
 ```
 
-Already have Node? Use npm instead (works on any version):
-
-```bash
-npm i -g @colbymchenry/codegraph
-```
-
-<sub>CodeGraph bundles its own runtime — nothing to compile, no native build, works the same everywhere. The installer puts `codegraph` on your PATH but **doesn't change your current shell** — open a new terminal before the next step so the command resolves.</sub>
+**Why `node dist/bin/codegraph.js` for the install step?**
+`npx` resolves from the npm registry, not from your local clone. The dist binary guarantees you're using the local build. The installer will offer to put `codegraph` on your PATH, so all subsequent commands use bare `codegraph`.
 
 <sub>**Upgrade any time** with `codegraph upgrade` — it detects how you installed (bundle, npm, or npx) and updates in place. Add `--check` to see if an update is available, or `codegraph upgrade <version>` to pin one.</sub>
 
@@ -317,7 +307,7 @@ Each bridge emits edges tagged `provenance:'heuristic'` with `metadata.synthesiz
 ### 1. Run the Installer
 
 ```bash
-npx @colbymchenry/codegraph
+node dist/bin/codegraph.js install
 ```
 
 The installer will:
@@ -331,10 +321,10 @@ The installer will:
 **Non-interactive (scripting / CI):**
 
 ```bash
-codegraph install --yes                              # auto-detect agents, install global
-codegraph install --target=cursor,claude --yes       # explicit target list
-codegraph install --target=auto --location=local     # detected agents, project-local
-codegraph install --print-config codex               # print snippet, no file writes
+node dist/bin/codegraph.js install --yes                              # auto-detect agents, install global
+node dist/bin/codegraph.js install --target=cursor,claude --yes       # explicit target list
+node dist/bin/codegraph.js install --target=auto --location=local     # detected agents, project-local
+node dist/bin/codegraph.js install --print-config codex               # print snippet, no file writes
 ```
 
 | Flag | Values | Default |
@@ -363,19 +353,14 @@ That's it — your agent will use CodeGraph tools automatically when a `.codegra
 <details>
 <summary><strong>Manual Setup (Alternative)</strong></summary>
 
-**Install globally:**
-```bash
-npm install -g @colbymchenry/codegraph
-```
-
-**Add to `~/.claude.json`:**
+**Add to `~/.claude.json`** (adjust the path to your local clone):
 ```json
 {
   "mcpServers": {
     "codegraph": {
       "type": "stdio",
-      "command": "codegraph",
-      "args": ["serve", "--mcp"]
+      "command": "node",
+      "args": ["/path/to/codegraph/dist/bin/codegraph.js", "serve", "--mcp"]
     }
   }
 }
@@ -451,6 +436,8 @@ The exact text is `src/mcp/server-instructions.ts` — the single source of trut
 ---
 
 ## CLI Reference
+
+> After running `codegraph install`, the CLI is available on your PATH.
 
 ```bash
 codegraph                         # Run interactive installer
@@ -678,7 +665,7 @@ Framework routing is validated the same way, on a canonical app per framework: E
 
 **MCP hits `database is locked`** — current builds shouldn't: CodeGraph bundles its own Node runtime and uses Node's built-in `node:sqlite` in WAL mode, where concurrent reads never block on a writer. If you still see it:
 
-- **You're on an old (pre-0.9) install.** Reinstall to get the bundled runtime — `curl -fsSL https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.sh | sh` (macOS/Linux), `irm https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.ps1 | iex` (Windows), or `npm i -g @colbymchenry/codegraph@latest`.
+- **You're on an old (pre-0.9) install.** Rebuild from source — `npm install && npm run build`.
 - **`codegraph status` shows `Journal:` other than `wal`** — WAL couldn't be enabled on this filesystem (common on network shares and WSL2 `/mnt`), so reads can block on writes. Move the project (with its `.codegraph/` folder) onto a local disk.
 
 **MCP server not connecting** — Ensure the project is initialized/indexed, verify the path in your MCP config, and check that `codegraph serve --mcp` works from the command line.
