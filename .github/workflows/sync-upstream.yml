@@ -381,7 +381,7 @@ jobs:
           DIFFSTAT=$(git diff --stat "${UPSTREAM_TARGET_REF}"..HEAD | tail -80)
           STATUS_LINE=""
           if [ "${VERIFY_EXIT}" = "0" ]; then
-            STATUS_LINE="✅ \`verify.sh\` passed. Safe to merge once a human eyeballs the diff."
+            STATUS_LINE="✅ \`verify.sh\` passed. Review the diff, then promote this branch to \`main\` with the command below. This is a rebase-style sync branch, so GitHub may show it as conflicting; do **not** use the normal PR merge button."
           else
             STATUS_LINE="❌ \`verify.sh\` failed (exit ${VERIFY_EXIT}). **Do not merge** until the failure is resolved."
           fi
@@ -394,6 +394,13 @@ jobs:
           - Model: \`${COPILOT_MODEL}\`
 
           ${STATUS_LINE}
+
+          Promotion command after review:
+
+          \`\`\`bash
+          git fetch origin ${BRANCH}
+          git push --force-with-lease origin FETCH_HEAD:main
+          \`\`\`
 
           <details><summary>diffstat (vs upstream target)</summary>
 
@@ -443,7 +450,7 @@ jobs:
 
       - name: Upload sync artifacts
         if: always() && steps.ancestry.outputs.skip != 'true' && steps.loop_guard.outputs.skip != 'true'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sync-artifacts-${{ steps.fetch.outputs.upstream_short }}
           path: |

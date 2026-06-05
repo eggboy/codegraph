@@ -9,6 +9,15 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **GitHub Copilot support** — `codegraph install` now configures two new
+  agent targets out of the box:
+  - **`copilot-vscode`** (project-local): writes `./.vscode/mcp.json` with the
+    VS Code MCP shape (top-level `servers` key) and a marker-delimited section
+    in `./.github/copilot-instructions.md`. JSONC-aware via `jsonc-parser`.
+  - **`copilot-cli`** (global only): writes `~/.copilot/mcp-config.json`
+    with the CLI's `mcpServers` shape, plus an explicit `tools` allowlist.
+
 
 ## [0.9.7] - 2026-05-28
 

@@ -16,8 +16,6 @@
 /** Markers used by the marker-based section removal. */
 export const CODEGRAPH_SECTION_START = '<!-- CODEGRAPH_START -->';
 export const CODEGRAPH_SECTION_END = '<!-- CODEGRAPH_END -->';
-<<<<<<< HEAD
-=======
 
 /**
  * The full marker-delimited block written into each agent's
@@ -66,4 +64,3 @@ ${CODEGRAPH_SECTION_END}`;
  * `claude-md-template.ts`.
  */
 export const CLAUDE_MD_TEMPLATE = INSTRUCTIONS_TEMPLATE;
->>>>>>> d5124c3 (feat: add GitHub Copilot support for VS Code and CLI)
