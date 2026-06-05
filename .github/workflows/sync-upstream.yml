@@ -31,9 +31,9 @@ on:
         type: boolean
         default: false
       model:
-        description: 'Copilot model (defaults to claude-sonnet-4.5)'
+        description: 'Copilot model (defaults to gpt-5.5)'
         type: string
-        default: claude-sonnet-4.5
+        default: gpt-5.5
       upstream_ref:
         description: 'Upstream branch/tag/SHA to sync (defaults to main; use v0.9.7 for incremental testing)'
         type: string
@@ -54,6 +54,7 @@ env:
   UPSTREAM_TARGET_REF: refs/remotes/upstream-sync/target
   SYNC_BRANCH_PREFIX: sync/upstream
   PR_LABEL: auto-sync
+  COPILOT_CLI_VERSION: '1.0.59'
 
 jobs:
   sync:
@@ -88,6 +89,10 @@ jobs:
         env:
           REQUESTED_UPSTREAM_REF: ${{ inputs.upstream_ref || 'main' }}
         run: |
+          if [[ "${REQUESTED_UPSTREAM_REF}" == -* ]]; then
+            echo "::error::Invalid upstream ref '${REQUESTED_UPSTREAM_REF}'. Ref names must not start with dash."
+            exit 1
+          fi
           if ! [[ "${REQUESTED_UPSTREAM_REF}" =~ ^[A-Za-z0-9._/-]{1,120}$ ]]; then
             echo "::error::Invalid upstream ref '${REQUESTED_UPSTREAM_REF}'. Ref names may only contain letters, numbers, dot, underscore, slash, and dash."
             exit 1
@@ -97,9 +102,11 @@ jobs:
           git update-ref "${UPSTREAM_TARGET_REF}" FETCH_HEAD
           UPSTREAM_SHA=$(git rev-parse "${UPSTREAM_TARGET_REF}")
           UPSTREAM_SHORT=$(git rev-parse --short=12 "${UPSTREAM_TARGET_REF}")
-          echo "upstream_ref=${REQUESTED_UPSTREAM_REF}" >> "$GITHUB_OUTPUT"
-          echo "upstream_sha=${UPSTREAM_SHA}" >> "$GITHUB_OUTPUT"
-          echo "upstream_short=${UPSTREAM_SHORT}" >> "$GITHUB_OUTPUT"
+          {
+            echo "upstream_ref=${REQUESTED_UPSTREAM_REF}"
+            echo "upstream_sha=${UPSTREAM_SHA}"
+            echo "upstream_short=${UPSTREAM_SHORT}"
+          } >> "$GITHUB_OUTPUT"
           echo "Upstream ${REQUESTED_UPSTREAM_REF}: ${UPSTREAM_SHORT}"
 
       - name: Skip if already at upstream target
@@ -167,7 +174,7 @@ jobs:
       - name: Install GitHub Copilot CLI
         if: steps.ancestry.outputs.skip != 'true' && steps.loop_guard.outputs.skip != 'true'
         run: |
-          npm install -g @github/copilot
+          npm install -g "@github/copilot@${COPILOT_CLI_VERSION}"
           copilot --version
 
       - name: Attempt rebase against upstream target
@@ -185,24 +192,30 @@ jobs:
           fi
           if [ "${REBASE_EXIT}" -eq 0 ]; then
             echo "Clean rebase — no conflicts."
-            echo "had_conflicts=false" >> "$GITHUB_OUTPUT"
-            echo "needs_pr=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "had_conflicts=false"
+              echo "needs_pr=false"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
           UNMERGED=$(git ls-files -u | wc -l | tr -d ' ')
           if [ "${UNMERGED}" -gt 0 ]; then
             echo "Rebase produced conflicts (${UNMERGED} unmerged entries). Will invoke Copilot CLI."
-            echo "had_conflicts=true" >> "$GITHUB_OUTPUT"
-            echo "needs_pr=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "had_conflicts=true"
+              echo "needs_pr=true"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
           # Non-conflict rebase failure (empty commit, hook failure,
           # ref issue). Don't fail the job — capture state and let the PR
           # path open a review PR so a human sees the diagnostics.
           echo "::warning::Rebase exited ${REBASE_EXIT} with no unmerged paths. Likely empty commit / hook / ref issue. Will open PR for review."
-          echo "had_conflicts=false" >> "$GITHUB_OUTPUT"
-          echo "needs_pr=true" >> "$GITHUB_OUTPUT"
-          echo "rebase_anomaly=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "had_conflicts=false"
+            echo "needs_pr=true"
+            echo "rebase_anomaly=true"
+          } >> "$GITHUB_OUTPUT"
           # If a rebase is still in progress (e.g. empty commit waiting
           # for --skip), abort so the rest of the workflow has a clean
           # tree to push.
@@ -213,7 +226,7 @@ jobs:
       - name: Resolve conflicts with Copilot CLI (headless)
         if: steps.rebase.outputs.had_conflicts == 'true'
         env:
-          COPILOT_MODEL: ${{ inputs.model || 'claude-sonnet-4.5' }}
+          COPILOT_MODEL: ${{ inputs.model || 'gpt-5.5' }}
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_CLI_PAT }}
         run: |
           # --allow-all     skip per-tool approvals (headless)
@@ -274,7 +287,8 @@ jobs:
           # Hard-fail if anything else is dirty: regenerating the lock
           # must not have touched anything else; the LLM/clean-rebase
           # branches must already have produced a clean tree.
-          if ! git diff --quiet || ! git diff --cached --quiet; then
+          DIRTY=$(git status --porcelain --untracked-files=normal)
+          if [ -n "${DIRTY}" ]; then
             echo "::error::Worktree dirty after lock regeneration:"
             git status --short
             exit 1
@@ -284,6 +298,12 @@ jobs:
           # the OLD lock file. Reinstall now so verify.sh runs build /
           # tests / smoke against the actual dependency set we'd ship.
           npm ci --no-audit --no-fund
+          DIRTY=$(git status --porcelain --untracked-files=normal)
+          if [ -n "${DIRTY}" ]; then
+            echo "::error::Worktree dirty after refreshing node_modules:"
+            git status --short
+            exit 1
+          fi
 
       - name: Verify post-rebase invariants
         id: verify
@@ -292,10 +312,16 @@ jobs:
           GH_TOKEN: ''
           GITHUB_TOKEN: ''
         run: |
+          EXPECTED_HEAD=$(git rev-parse HEAD)
           set +e
           bash scripts/sync/verify.sh | tee /tmp/sync/verify.log
           VERIFY_EXIT=${PIPESTATUS[0]}
           set -e
+          ACTUAL_HEAD=$(git rev-parse HEAD)
+          if [ "${ACTUAL_HEAD}" != "${EXPECTED_HEAD}" ]; then
+            echo "::error::verify.sh changed HEAD from ${EXPECTED_HEAD} to ${ACTUAL_HEAD}."
+            VERIFY_EXIT=98
+          fi
           echo "verify_exit=${VERIFY_EXIT}" >> "$GITHUB_OUTPUT"
           if [ "${VERIFY_EXIT}" -ne 0 ]; then
             echo "::warning::verify.sh failed (exit ${VERIFY_EXIT}); will open PR for review."
@@ -348,7 +374,7 @@ jobs:
           echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
 
       - name: Remove push credentials
-        if: steps.outcome.outputs.mode == 'fast_forward' || steps.outcome.outputs.mode == 'pull_request'
+        if: always() && (steps.outcome.outputs.mode == 'fast_forward' || steps.outcome.outputs.mode == 'pull_request')
         env:
           REPOSITORY: ${{ github.repository }}
         run: git remote set-url origin "https://github.com/${REPOSITORY}.git"
@@ -356,7 +382,7 @@ jobs:
       - name: Open or update sync PR
         if: steps.outcome.outputs.mode == 'pull_request'
         env:
-          COPILOT_MODEL: ${{ inputs.model || 'claude-sonnet-4.5' }}
+          COPILOT_MODEL: ${{ inputs.model || 'gpt-5.5' }}
           HAD_CONFLICTS: ${{ steps.rebase.outputs.had_conflicts }}
           GH_TOKEN: ${{ secrets.RELEASE_PAT }}
           REPOSITORY: ${{ github.repository }}
@@ -376,6 +402,7 @@ jobs:
           TITLE="chore(sync): upstream ${UP_SHORT} → ${DATE}"
           VERIFY_TAIL=""
           if [ -f /tmp/sync/verify.log ]; then
+            # shellcheck disable=SC2016
             VERIFY_TAIL=$(tail -60 /tmp/sync/verify.log | sed 's/`/\\`/g')
           fi
           DIFFSTAT=$(git diff --stat "${UPSTREAM_TARGET_REF}"..HEAD | tail -80)
@@ -430,18 +457,17 @@ jobs:
             --head "${BRANCH}" \
             --json number --jq '.[0].number // empty')
           if [ -z "${EXISTING}" ]; then
-            LABELS_FLAG="--label ${PR_LABEL} --label needs-review"
+            LABEL_ARGS=(--label "${PR_LABEL}" --label needs-review)
             if [ "${VERIFY_EXIT}" != "0" ]; then
-              LABELS_FLAG="${LABELS_FLAG} --label verify-failed"
+              LABEL_ARGS+=(--label verify-failed)
             fi
-            # shellcheck disable=SC2086
             gh pr create \
               --repo "${REPOSITORY}" \
               --base main \
               --head "${BRANCH}" \
               --title "${TITLE}" \
               --body "${BODY}" \
-              ${LABELS_FLAG}
+              "${LABEL_ARGS[@]}"
           else
             gh pr edit "${EXISTING}" \
               --repo "${REPOSITORY}" \

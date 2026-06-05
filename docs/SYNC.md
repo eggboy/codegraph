@@ -13,7 +13,7 @@ opens.
 ## TL;DR
 
 - **Cadence:** Monday 09:00 UTC (cron), plus manual dispatch.
-- **Resolution:** GitHub Copilot CLI (`claude-sonnet-4.5`) reads
+- **Resolution:** GitHub Copilot CLI (`gpt-5.5`) reads
   `scripts/sync/copilot-resolve-prompt.md` and resolves conflicts headless.
 - **Safety net:** `scripts/sync/verify.sh` runs after every rebase
   attempt and re-proves the fork's invariants (build, tests, MCP smoke,
@@ -29,17 +29,16 @@ opens.
 | Secret | Purpose | Scope |
 |---|---|---|
 | `RELEASE_PAT` | Push to `main`, create PRs. Re-used from the release workflow. | Fine-grained PAT (or classic), **contents: write** + **pull-requests: write** on this repo. |
-| `COPILOT_CLI_PAT` | Authenticates the headless Copilot CLI to the LLM API. The default `GITHUB_TOKEN` does NOT work. | Classic PAT with the **`copilot`** scope. Issued by an account with a Copilot subscription. |
+| `COPILOT_CLI_PAT` | Authenticates the headless Copilot CLI to the LLM API. The default `GITHUB_TOKEN` does NOT work. | GitHub CLI OAuth token from an account with a Copilot subscription, or a fine-grained PAT with **Copilot Requests** if GitHub exposes it. Classic `ghp_` PATs with the `copilot` scope are rejected by Copilot CLI. |
 
 Create the `COPILOT_CLI_PAT`:
 
-1. Visit <https://github.com/settings/tokens> → **Generate new token (classic)**.
-2. Note: "codegraph fork auto-sync — Copilot CLI".
-3. Expiration: 90 days (rotate per your policy).
-4. Scopes: tick **`copilot`** only.
-5. Generate, copy.
-6. Repo → **Settings → Secrets and variables → Actions → New repository secret**.
-7. Name: `COPILOT_CLI_PAT`. Value: paste.
+1. Authenticate `gh` locally as the Copilot-licensed account that should run the resolver.
+2. Store the GitHub CLI OAuth token directly without printing it:
+   ```bash
+   gh auth token | gh secret set COPILOT_CLI_PAT --repo eggboy/codegraph --body-file -
+   ```
+3. If you prefer a UI-created token and GitHub offers **Copilot Requests** for fine-grained PATs, create one for this repo and save it as the same repository secret.
 
 Confirm `RELEASE_PAT` already exists (release.yml uses it). If not, create
 a fine-grained PAT with **contents: write** and **pull-requests: write**
@@ -47,11 +46,10 @@ on this repo only.
 
 ### 2. Org policy check
 
-If your account belongs to a GitHub organization that restricts PAT
-issuance (the "Restrict personal access tokens" setting), you may need
-to request approval before the `copilot`-scoped PAT works against this
-repo. The symptom is: `copilot auth status` reports 401/403 in the CI
-run. Workarounds:
+If your account belongs to a GitHub organization that restricts OAuth
+tokens or fine-grained PATs, you may need to request approval before the
+Copilot token works against this repo. The symptom is: `copilot auth
+status` reports 401/403 in the CI run. Workarounds:
 
 - **Self-hosted runner** with `gh auth login` configured persistently
   (the token sits on the runner machine, not in repo secrets).
@@ -75,20 +73,21 @@ the workflow rebases and reports the outcome on GitHub Step Summary.
 ```
 Mondays 09:00 UTC (or manual)
     │
-    ├─ Checkout fork (full history) using RELEASE_PAT
-    ├─ git fetch upstream main
-    ├─ If upstream/main is already an ancestor of HEAD → exit (nothing to do)
+    ├─ Checkout fork (full history, no persisted credentials)
+    ├─ git fetch selected upstream ref (main by default)
+    ├─ If the upstream target is already an ancestor of HEAD → exit (nothing to do)
     ├─ If an open auto-sync PR already targets this upstream HEAD SHA → exit (loop guard)
     ├─ npm ci
-    ├─ npm install -g @github/copilot
+    ├─ npm install -g @github/copilot@1.0.59
     │
-    ├─ git rebase upstream/main
+    ├─ git rebase selected upstream target
     │   ├─ Clean → had_conflicts=false
     │   └─ Conflicts → had_conflicts=true, agent step runs
     │
     ├─ If had_conflicts: copilot -p "$(cat scripts/sync/copilot-resolve-prompt.md)"
-    │      --allow-all --no-ask-user --model claude-sonnet-4.5
-    │      --add-dir $(pwd) --share /tmp/sync/sync-log.md
+    │      --allow-all --no-ask-user --disable-builtin-mcps
+    │      --secret-env-vars=COPILOT_GITHUB_TOKEN
+    │      --model gpt-5.5 --add-dir $(pwd)
     │   The agent:
     │     - reads the prompt
     │     - inspects every conflict
@@ -177,7 +176,7 @@ GIT_EDITOR=true git rebase upstream/main
 copilot \
   -p "$(cat scripts/sync/copilot-resolve-prompt.md)" \
   --allow-all --no-ask-user \
-  --model claude-sonnet-4.5 \
+  --model gpt-5.5 \
   --add-dir "$(pwd)" \
   --share /tmp/sync-log.md
 
@@ -192,7 +191,7 @@ bash scripts/sync/verify.sh
 
 | Failure | Cause | Fix |
 |---|---|---|
-| `copilot auth status` 401 in CI | `COPILOT_CLI_PAT` missing or expired | Rotate the PAT; re-add to secrets |
+| `copilot auth status` 401 in CI | `COPILOT_CLI_PAT` missing, expired, or created as an unsupported classic `ghp_` PAT | Store a fresh `gh auth token` output or fine-grained Copilot Requests token as the secret |
 | `gh pr create` 403 | `RELEASE_PAT` missing `pull-requests: write` | Re-issue with correct scope |
 | Workflow opens 4 PRs in a row for the same upstream SHA | Loop-guard bug (head branch naming drift) | Inspect the head branch name; confirm `sync/upstream/<short>` matches what the guard searches |
 | `verify.sh` flakes on V8 wasm crash | Known Node 24 issue with the `node-sqlite3-wasm` fallback | Already handled — script distinguishes worker crashes from test failures |
@@ -202,9 +201,10 @@ bash scripts/sync/verify.sh
 ## Tuning
 
 - **Cadence.** Edit the `cron:` line. Current: Monday 09:00 UTC.
-- **Model.** Default `claude-sonnet-4.5`. Override per-run via the
-  `workflow_dispatch` input. If sonnet starts producing low-quality
-  resolutions, try `opus`-class via the input.
+- **Model.** Default `gpt-5.5`. Override per-run via the
+  `workflow_dispatch` input if you need to test another model.
+- **Copilot CLI version.** Edit `COPILOT_CLI_VERSION` in
+  `.github/workflows/sync-upstream.yml`. Current: `1.0.59`.
 - **Slop guard threshold.** Edit `MIN_COPILOT_TEST_MENTIONS` near the
   top of `scripts/sync/verify.sh`. Current: 30 (actual: ~35).
 - **Forced re-run on the same upstream SHA.** Use `workflow_dispatch`
@@ -286,15 +286,17 @@ merge the older PR before letting the cron tick produce a new one
 Symptom: the `Install GitHub Copilot CLI` step prints
 `copilot --version` OK but the resolution step exits with
 `Authentication failed` or `401`. The PR will NOT open because the
-workflow aborts before the PR step. Rotate the PAT, re-add to
-secrets, and re-dispatch with `force=true`.
+workflow aborts before the PR step. Store a fresh GitHub CLI OAuth token
+or fine-grained Copilot Requests token in `COPILOT_CLI_PAT`, then
+re-dispatch with `force=true`.
 
 ### Artifacts and logs
 
-Each run uploads `/tmp/sync/sync-log.md` (Copilot session transcript)
-and `/tmp/sync/verify.log` (verifier output) as a workflow artifact
-named `sync-artifacts-<upstream_short>`, retained 30 days. For
-deeper diagnostics, the raw build log lives in the
+Each run uploads `/tmp/sync/rebase.log` and `/tmp/sync/verify.log`
+as a workflow artifact named `sync-artifacts-<upstream_short>`,
+retained 30 days. The Copilot session transcript is intentionally not
+published because the resolver step is secret-bearing. For deeper
+diagnostics, the raw build log lives in the
 `Verify post-rebase invariants` step's stdout — open the run page in
 the Actions tab and expand the step.
 
