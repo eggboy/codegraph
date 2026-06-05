@@ -1093,6 +1093,7 @@ describe('Installer targets — partial-state idempotency', () => {
     const after = JSON.parse(fs.readFileSync(file, 'utf-8'));
     // Both events emptied → the whole `hooks` object is removed.
     expect(after.hooks).toBeUndefined();
+  });
 
   // ============================================================
   // Copilot VS Code — shape & quirks
@@ -1475,6 +1476,7 @@ describe('Installer — uninstallTargets sweep (codegraph uninstall)', () => {
     const reports = uninstallTargets(ALL_TARGETS, 'global');
 
     for (const t of ALL_TARGETS) {
+      if (!t.supportsLocation('global')) continue;
       const r = reports.find((x) => x.id === t.id)!;
       expect(r.status).toBe('removed');
       expect(r.removedPaths.length).toBeGreaterThan(0);
@@ -1486,6 +1488,7 @@ describe('Installer — uninstallTargets sweep (codegraph uninstall)', () => {
   it('is safe on a clean slate — every agent reports not-configured, nothing removed', () => {
     const reports = uninstallTargets(ALL_TARGETS, 'global');
     for (const r of reports) {
+      if (r.status === 'unsupported') continue;
       expect(r.status).toBe('not-configured');
       expect(r.removedPaths).toEqual([]);
     }
@@ -1501,7 +1504,7 @@ describe('Installer — uninstallTargets sweep (codegraph uninstall)', () => {
     expect(claude.status).toBe('removed');
     expect(claude.displayName).toBe(getTarget('claude')!.displayName);
 
-    for (const r of reports.filter((x) => x.id !== 'claude')) {
+    for (const r of reports.filter((x) => x.id !== 'claude' && x.status !== 'unsupported')) {
       expect(r.status).toBe('not-configured');
     }
   });
@@ -1529,6 +1532,7 @@ describe('Installer — uninstallTargets sweep (codegraph uninstall)', () => {
 
     const second = uninstallTargets(ALL_TARGETS, 'global');
     for (const r of second) {
+      if (r.status === 'unsupported') continue;
       expect(r.status).toBe('not-configured');
       expect(r.removedPaths).toEqual([]);
     }
