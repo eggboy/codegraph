@@ -1,6 +1,6 @@
 # Automated upstream-sync workflow for the GHCP fork.
 #
-# Pulls colbymchenry/codegraph upstream/main into eggboy/codegraph main on a
+# Pulls a selected colbymchenry/codegraph upstream ref into eggboy/codegraph main on a
 # weekly cadence. When the rebase is clean → push directly. When upstream
 # touched anything the fork also touched → invoke GitHub Copilot CLI to
 # resolve the conflicts headless, then re-prove correctness via
@@ -27,13 +27,17 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: 'Run even if a sync PR for the current upstream HEAD already exists'
+        description: 'Run even if a sync PR for the current upstream target already exists'
         type: boolean
         default: false
       model:
         description: 'Copilot model (defaults to claude-sonnet-4.5)'
         type: string
         default: claude-sonnet-4.5
+      upstream_ref:
+        description: 'Upstream branch/tag/SHA to sync (defaults to main; use v0.9.7 for incremental testing)'
+        type: string
+        default: main
 
 concurrency:
   group: sync-upstream
@@ -42,36 +46,37 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
+  pull-requests: read
 
 env:
   UPSTREAM_REMOTE_URL: https://github.com/colbymchenry/codegraph.git
+  UPSTREAM_TARGET_REF: refs/remotes/upstream-sync/target
   SYNC_BRANCH_PREFIX: sync/upstream
   PR_LABEL: auto-sync
 
 jobs:
   sync:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - name: Checkout fork (full history)
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          # Full history so the rebase against upstream/main has commits to
+          # Full history so the rebase against the selected upstream target has commits to
           # work with, and so the eventual push doesn't get rejected.
           fetch-depth: 0
           ref: main
-          # SECURITY: Do NOT persist the PAT into .git/config. The Copilot
-          # CLI step runs with --allow-all, and a persisted credential
-          # would let it `git push` or call the GitHub API behind our
-          # back. We re-inject the PAT explicitly only for the push and
-          # gh-pr steps below.
+          # SECURITY: Do NOT persist credentials into .git/config. The Copilot
+          # CLI step runs with --allow-all; push/PR credentials are injected
+          # explicitly only after the agent exits.
           persist-credentials: false
-          token: ${{ secrets.RELEASE_PAT }}
 
       - name: Prepare sync state dir
         run: mkdir -p /tmp/sync
+
+      - name: Capture trusted Copilot prompt
+        run: cp scripts/sync/copilot-resolve-prompt.md /tmp/sync/copilot-resolve-prompt.md
 
       - name: Configure git author
         run: |
@@ -80,20 +85,30 @@ jobs:
 
       - name: Add upstream remote and fetch
         id: fetch
+        env:
+          REQUESTED_UPSTREAM_REF: ${{ inputs.upstream_ref || 'main' }}
         run: |
+          if ! [[ "${REQUESTED_UPSTREAM_REF}" =~ ^[A-Za-z0-9._/-]{1,120}$ ]]; then
+            echo "::error::Invalid upstream ref '${REQUESTED_UPSTREAM_REF}'. Ref names may only contain letters, numbers, dot, underscore, slash, and dash."
+            exit 1
+          fi
           git remote add upstream "${UPSTREAM_REMOTE_URL}"
-          git fetch upstream main --no-tags
-          UPSTREAM_SHA=$(git rev-parse upstream/main)
-          UPSTREAM_SHORT=$(git rev-parse --short=12 upstream/main)
+          git fetch upstream "${REQUESTED_UPSTREAM_REF}" --no-tags
+          git update-ref "${UPSTREAM_TARGET_REF}" FETCH_HEAD
+          UPSTREAM_SHA=$(git rev-parse "${UPSTREAM_TARGET_REF}")
+          UPSTREAM_SHORT=$(git rev-parse --short=12 "${UPSTREAM_TARGET_REF}")
+          echo "upstream_ref=${REQUESTED_UPSTREAM_REF}" >> "$GITHUB_OUTPUT"
           echo "upstream_sha=${UPSTREAM_SHA}" >> "$GITHUB_OUTPUT"
           echo "upstream_short=${UPSTREAM_SHORT}" >> "$GITHUB_OUTPUT"
-          echo "Upstream HEAD: ${UPSTREAM_SHORT}"
+          echo "Upstream ${REQUESTED_UPSTREAM_REF}: ${UPSTREAM_SHORT}"
 
-      - name: Skip if already at upstream HEAD
+      - name: Skip if already at upstream target
         id: ancestry
+        env:
+          UPSTREAM_SHA: ${{ steps.fetch.outputs.upstream_sha }}
         run: |
-          if git merge-base --is-ancestor "${{ steps.fetch.outputs.upstream_sha }}" HEAD; then
-            echo "Fork already contains upstream/main — nothing to sync."
+          if git merge-base --is-ancestor "${UPSTREAM_SHA}" HEAD; then
+            echo "Fork already contains upstream target — nothing to sync."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -103,33 +118,36 @@ jobs:
         id: loop_guard
         if: steps.ancestry.outputs.skip != 'true'
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+          FORCE_SYNC: ${{ inputs.force }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          UPSTREAM_SHORT: ${{ steps.fetch.outputs.upstream_short }}
         run: |
-          if [ "${{ inputs.force }}" = "true" ]; then
+          if [ "${FORCE_SYNC}" = "true" ]; then
             echo "force=true → bypassing loop guard"
             echo "skip=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          UP_SHORT=${{ steps.fetch.outputs.upstream_short }}
+          UP_SHORT="${UPSTREAM_SHORT}"
           BRANCH="${SYNC_BRANCH_PREFIX}/${UP_SHORT}"
           # Two-part guard:
-          #   (1) Exact head-branch match for the CURRENT upstream HEAD.
+          #   (1) Exact head-branch match for the CURRENT upstream target.
           #       Stops a fresh cron tick from re-doing the same broken
           #       sync. Uses --head (exact match) instead of --search to
           #       avoid label drift and string-search ambiguity.
           #   (2) Any other open auto-sync PR on the repo, regardless of
           #       upstream SHA. Two open auto-sync PRs is operational
           #       noise; let the human close/merge the older one first.
-          EXACT=$(gh pr list --repo "${{ github.repository }}" --state open --head "${BRANCH}" --json number --jq '.[].number')
+          EXACT=$(gh pr list --repo "${REPOSITORY}" --state open --head "${BRANCH}" --json number --jq '.[].number')
           if [ -n "${EXACT}" ]; then
             echo "Open auto-sync PR for upstream ${UP_SHORT} already exists (#${EXACT}). Skipping."
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          ANY=$(gh pr list --repo "${{ github.repository }}" --state open --label "${PR_LABEL}" --json number,headRefName --jq '.[] | .number')
+          ANY=$(gh pr list --repo "${REPOSITORY}" --state open --label "${PR_LABEL}" --json number,headRefName --jq '.[] | .number')
           if [ -n "${ANY}" ]; then
             echo "Other open auto-sync PR(s) already exist:"
-            gh pr list --repo "${{ github.repository }}" --state open --label "${PR_LABEL}" --json number,headRefName,title --jq '.[]'
+            gh pr list --repo "${REPOSITORY}" --state open --label "${PR_LABEL}" --json number,headRefName,title --jq '.[]'
             echo "Skipping until they are resolved (close or merge them, then re-dispatch with force=true)."
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
@@ -138,7 +156,7 @@ jobs:
 
       - name: Setup Node
         if: steps.ancestry.outputs.skip != 'true' && steps.loop_guard.outputs.skip != 'true'
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 22
 
@@ -148,23 +166,16 @@ jobs:
 
       - name: Install GitHub Copilot CLI
         if: steps.ancestry.outputs.skip != 'true' && steps.loop_guard.outputs.skip != 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.COPILOT_CLI_PAT }}
-          GH_TOKEN: ${{ secrets.COPILOT_CLI_PAT }}
         run: |
           npm install -g @github/copilot
-          # Authenticate Copilot CLI non-interactively. The CLI reads
-          # GITHUB_TOKEN at runtime — making it available globally for the
-          # subsequent step.
           copilot --version
-          echo "GITHUB_TOKEN=${{ secrets.COPILOT_CLI_PAT }}" >> "$GITHUB_ENV"
 
-      - name: Attempt rebase against upstream/main
+      - name: Attempt rebase against upstream target
         id: rebase
         if: steps.ancestry.outputs.skip != 'true' && steps.loop_guard.outputs.skip != 'true'
         run: |
           set +e
-          GIT_EDITOR=true git rebase upstream/main 2>&1 | tee /tmp/sync/rebase.log
+          GIT_EDITOR=true git rebase "${UPSTREAM_TARGET_REF}" 2>&1 | tee /tmp/sync/rebase.log
           REBASE_EXIT=${PIPESTATUS[0]}
           set -e
           GITDIR=$(git rev-parse --git-dir)
@@ -202,20 +213,23 @@ jobs:
       - name: Resolve conflicts with Copilot CLI (headless)
         if: steps.rebase.outputs.had_conflicts == 'true'
         env:
+          COPILOT_MODEL: ${{ inputs.model || 'claude-sonnet-4.5' }}
           GITHUB_TOKEN: ${{ secrets.COPILOT_CLI_PAT }}
           GH_TOKEN: ${{ secrets.COPILOT_CLI_PAT }}
         run: |
           # --allow-all     skip per-tool approvals (headless)
           # --no-ask-user   never prompt the human (we have none)
-          # --share         dump session transcript for the PR body
           # --add-dir cwd   ensure CLI has full repo access
+          if ! [[ "${COPILOT_MODEL}" =~ ^[A-Za-z0-9._-]{1,80}$ ]]; then
+            echo "::error::Invalid Copilot model '${COPILOT_MODEL}'. Model names may only contain letters, numbers, dot, underscore, and dash."
+            exit 1
+          fi
           copilot \
-            -p "$(cat scripts/sync/copilot-resolve-prompt.md)" \
+            -p "$(cat /tmp/sync/copilot-resolve-prompt.md)" \
             --allow-all \
             --no-ask-user \
-            --model "${{ inputs.model || 'claude-sonnet-4.5' }}" \
-            --add-dir "$(pwd)" \
-            --share /tmp/sync/sync-log.md
+            --model "${COPILOT_MODEL}" \
+            --add-dir "$(pwd)"
           # Post-conditions. Any of these failing means the agent left the
           # tree in a state we cannot safely push.
           GITDIR=$(git rev-parse --git-dir)
@@ -245,6 +259,9 @@ jobs:
         # Lock file is always derived. Whether the rebase was clean or
         # LLM-resolved, regenerate from the merged package.json so the
         # checksum matches what `npm ci` would produce.
+        env:
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
         run: |
           npm install --package-lock-only --ignore-scripts
           if ! git diff --quiet -- package-lock.json; then
@@ -270,6 +287,9 @@ jobs:
       - name: Verify post-rebase invariants
         id: verify
         if: steps.ancestry.outputs.skip != 'true' && steps.loop_guard.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
         run: |
           set +e
           bash scripts/sync/verify.sh | tee /tmp/sync/verify.log
@@ -283,10 +303,11 @@ jobs:
       - name: Decide outcome
         id: outcome
         if: steps.ancestry.outputs.skip != 'true' && steps.loop_guard.outputs.skip != 'true'
+        env:
+          HAD_CONFLICTS: ${{ steps.rebase.outputs.had_conflicts }}
+          NEEDS_PR: ${{ steps.rebase.outputs.needs_pr }}
+          VERIFY_EXIT: ${{ steps.verify.outputs.verify_exit }}
         run: |
-          HAD_CONFLICTS="${{ steps.rebase.outputs.had_conflicts }}"
-          NEEDS_PR="${{ steps.rebase.outputs.needs_pr }}"
-          VERIFY_EXIT="${{ steps.verify.outputs.verify_exit }}"
           if [ "${HAD_CONFLICTS}" = "false" ] && [ "${NEEDS_PR}" != "true" ] && [ "${VERIFY_EXIT}" = "0" ]; then
             # Clean rebase + no anomaly + green verify → push straight to main.
             echo "mode=fast_forward" >> "$GITHUB_OUTPUT"
@@ -299,12 +320,13 @@ jobs:
         if: steps.outcome.outputs.mode == 'fast_forward' || steps.outcome.outputs.mode == 'pull_request'
         env:
           PUSH_PAT: ${{ secrets.RELEASE_PAT }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           # Re-inject the PAT now that the Copilot CLI step has completed.
           # `persist-credentials: false` on checkout meant no git remote
           # auth was configured during the LLM step; this restores it
           # for the explicit push that follows.
-          git remote set-url origin "https://x-access-token:${PUSH_PAT}@github.com/${{ github.repository }}.git"
+          git remote set-url origin "https://x-access-token:${PUSH_PAT}@github.com/${REPOSITORY}.git"
 
       - name: Push to main (fast-forward)
         if: steps.outcome.outputs.mode == 'fast_forward'
@@ -316,46 +338,63 @@ jobs:
       - name: Push sync branch (PR path)
         id: push_branch
         if: steps.outcome.outputs.mode == 'pull_request'
+        env:
+          UPSTREAM_SHORT: ${{ steps.fetch.outputs.upstream_short }}
         run: |
-          BRANCH="${SYNC_BRANCH_PREFIX}/${{ steps.fetch.outputs.upstream_short }}"
+          BRANCH="${SYNC_BRANCH_PREFIX}/${UPSTREAM_SHORT}"
           # If a prior failed attempt left the same-named branch, overwrite.
           git push --force origin "HEAD:refs/heads/${BRANCH}"
           echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
 
+      - name: Remove push credentials
+        if: steps.outcome.outputs.mode == 'fast_forward' || steps.outcome.outputs.mode == 'pull_request'
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: git remote set-url origin "https://github.com/${REPOSITORY}.git"
+
       - name: Open or update sync PR
         if: steps.outcome.outputs.mode == 'pull_request'
         env:
+          COPILOT_MODEL: ${{ inputs.model || 'claude-sonnet-4.5' }}
+          HAD_CONFLICTS: ${{ steps.rebase.outputs.had_conflicts }}
           GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+          REPOSITORY: ${{ github.repository }}
+          SYNC_BRANCH: ${{ steps.push_branch.outputs.branch }}
+          UPSTREAM_REF: ${{ steps.fetch.outputs.upstream_ref }}
+          UPSTREAM_SHA: ${{ steps.fetch.outputs.upstream_sha }}
+          UPSTREAM_SHORT: ${{ steps.fetch.outputs.upstream_short }}
+          VERIFY_EXIT: ${{ steps.verify.outputs.verify_exit }}
         run: |
-          BRANCH="${{ steps.push_branch.outputs.branch }}"
-          UP_SHORT="${{ steps.fetch.outputs.upstream_short }}"
+          if ! [[ "${COPILOT_MODEL}" =~ ^[A-Za-z0-9._-]{1,80}$ ]]; then
+            echo "::error::Invalid Copilot model '${COPILOT_MODEL}'. Model names may only contain letters, numbers, dot, underscore, and dash."
+            exit 1
+          fi
+          BRANCH="${SYNC_BRANCH}"
+          UP_SHORT="${UPSTREAM_SHORT}"
           DATE=$(date -u +%Y-%m-%d)
           TITLE="chore(sync): upstream ${UP_SHORT} → ${DATE}"
           VERIFY_TAIL=""
           if [ -f /tmp/sync/verify.log ]; then
             VERIFY_TAIL=$(tail -60 /tmp/sync/verify.log | sed 's/`/\\`/g')
           fi
-          SYNC_LOG_TAIL=""
-          if [ -f /tmp/sync/sync-log.md ]; then
-            SYNC_LOG_TAIL=$(tail -120 /tmp/sync/sync-log.md | sed 's/`/\\`/g')
-          fi
-          DIFFSTAT=$(git diff --stat upstream/main..HEAD | tail -80)
+          DIFFSTAT=$(git diff --stat "${UPSTREAM_TARGET_REF}"..HEAD | tail -80)
           STATUS_LINE=""
-          if [ "${{ steps.verify.outputs.verify_exit }}" = "0" ]; then
+          if [ "${VERIFY_EXIT}" = "0" ]; then
             STATUS_LINE="✅ \`verify.sh\` passed. Safe to merge once a human eyeballs the diff."
           else
-            STATUS_LINE="❌ \`verify.sh\` failed (exit ${{ steps.verify.outputs.verify_exit }}). **Do not merge** until the failure is resolved."
+            STATUS_LINE="❌ \`verify.sh\` failed (exit ${VERIFY_EXIT}). **Do not merge** until the failure is resolved."
           fi
           BODY=$(cat <<EOF
           Automated upstream sync.
 
-          - Upstream HEAD: \`${UP_SHORT}\` (\`${{ steps.fetch.outputs.upstream_sha }}\`)
-          - Conflicts during rebase: \`${{ steps.rebase.outputs.had_conflicts }}\`
-          - Model: \`${{ inputs.model || 'claude-sonnet-4.5' }}\`
+          - Upstream ref: \`${UPSTREAM_REF}\`
+          - Upstream target: \`${UP_SHORT}\` (\`${UPSTREAM_SHA}\`)
+          - Conflicts during rebase: \`${HAD_CONFLICTS}\`
+          - Model: \`${COPILOT_MODEL}\`
 
           ${STATUS_LINE}
 
-          <details><summary>diffstat (vs upstream/main)</summary>
+          <details><summary>diffstat (vs upstream target)</summary>
 
           \`\`\`
           ${DIFFSTAT}
@@ -369,12 +408,7 @@ jobs:
           \`\`\`
           </details>
 
-          <details><summary>Copilot CLI session (tail)</summary>
-
-          \`\`\`
-          ${SYNC_LOG_TAIL}
-          \`\`\`
-          </details>
+          _Copilot CLI transcript intentionally not published: the resolver step is secret-bearing._
 
           ---
           See [docs/SYNC.md](../blob/main/docs/SYNC.md) for the runbook.
@@ -383,17 +417,17 @@ jobs:
 
           # Open the PR if missing; otherwise update title/body in place.
           EXISTING=$(gh pr list \
-            --repo "${{ github.repository }}" \
+            --repo "${REPOSITORY}" \
             --head "${BRANCH}" \
             --json number --jq '.[0].number // empty')
           if [ -z "${EXISTING}" ]; then
             LABELS_FLAG="--label ${PR_LABEL} --label needs-review"
-            if [ "${{ steps.verify.outputs.verify_exit }}" != "0" ]; then
+            if [ "${VERIFY_EXIT}" != "0" ]; then
               LABELS_FLAG="${LABELS_FLAG} --label verify-failed"
             fi
             # shellcheck disable=SC2086
             gh pr create \
-              --repo "${{ github.repository }}" \
+              --repo "${REPOSITORY}" \
               --base main \
               --head "${BRANCH}" \
               --title "${TITLE}" \
@@ -401,32 +435,39 @@ jobs:
               ${LABELS_FLAG}
           else
             gh pr edit "${EXISTING}" \
-              --repo "${{ github.repository }}" \
+              --repo "${REPOSITORY}" \
               --title "${TITLE}" \
               --body "${BODY}"
           fi
 
       - name: Upload sync artifacts
         if: always() && steps.ancestry.outputs.skip != 'true' && steps.loop_guard.outputs.skip != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sync-artifacts-${{ steps.fetch.outputs.upstream_short }}
           path: |
-            /tmp/sync/sync-log.md
+            /tmp/sync/rebase.log
             /tmp/sync/verify.log
           if-no-files-found: ignore
           retention-days: 30
 
       - name: Summarize
         if: always()
+        env:
+          ANCESTRY_SKIP: ${{ steps.ancestry.outputs.skip }}
+          HAD_CONFLICTS: ${{ steps.rebase.outputs.had_conflicts }}
+          LOOP_GUARD_SKIP: ${{ steps.loop_guard.outputs.skip }}
+          OUTCOME_MODE: ${{ steps.outcome.outputs.mode }}
+          UPSTREAM_SHORT: ${{ steps.fetch.outputs.upstream_short }}
+          VERIFY_EXIT: ${{ steps.verify.outputs.verify_exit }}
         run: |
           {
             echo "# Upstream sync summary"
             echo
-            echo "- Upstream HEAD: \`${{ steps.fetch.outputs.upstream_short }}\`"
-            echo "- Already at upstream: \`${{ steps.ancestry.outputs.skip }}\`"
-            echo "- Open-PR loop guard hit: \`${{ steps.loop_guard.outputs.skip }}\`"
-            echo "- Had conflicts: \`${{ steps.rebase.outputs.had_conflicts }}\`"
-            echo "- verify.sh exit: \`${{ steps.verify.outputs.verify_exit }}\`"
-            echo "- Outcome: \`${{ steps.outcome.outputs.mode }}\`"
+            echo "- Upstream target: \`${UPSTREAM_SHORT}\`"
+            echo "- Already at upstream: \`${ANCESTRY_SKIP}\`"
+            echo "- Open-PR loop guard hit: \`${LOOP_GUARD_SKIP}\`"
+            echo "- Had conflicts: \`${HAD_CONFLICTS}\`"
+            echo "- verify.sh exit: \`${VERIFY_EXIT}\`"
+            echo "- Outcome: \`${OUTCOME_MODE}\`"
           } >> "$GITHUB_STEP_SUMMARY"
