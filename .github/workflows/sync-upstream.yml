@@ -400,6 +400,7 @@ jobs:
           \`\`\`bash
           git fetch origin ${BRANCH}
           git push --force-with-lease origin FETCH_HEAD:main
+          git push origin --delete ${BRANCH}
           \`\`\`
 
           <details><summary>diffstat (vs upstream target)</summary>
