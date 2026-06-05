@@ -16,6 +16,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### New Features
 
+- **GitHub Copilot support** — `codegraph install` now configures two new agent targets out of the box:
+  - **`copilot-vscode`** (project-local): writes `./.vscode/mcp.json` with the VS Code MCP shape (top-level `servers` key) and a marker-delimited section in `./.github/copilot-instructions.md`. JSONC-aware via `jsonc-parser`.
+  - **`copilot-cli`** (global only): writes `~/.copilot/mcp-config.json` with the CLI's `mcpServers` shape, plus an explicit `tools` allowlist.
 - New `codegraph upgrade` command updates CodeGraph to the latest release in place — it detects how you installed (the standalone `install.sh` / `install.ps1` bundle, npm, or npx) and does the right thing for each, on macOS, Linux, and Windows. Use `codegraph upgrade --check` to see whether an update is available without installing, or `codegraph upgrade <version>` to move to a specific version. After upgrading it reminds you to re-index your projects so they pick up the newer engine's improvements. (#679)
 - `codegraph status` now flags when a project's index was built by an older engine than the one you're running and recommends re-indexing (also surfaced in `codegraph status --json`), so you know when a `codegraph index -f` or `codegraph sync` will add coverage a newer release introduced.
 - Cross-file impact and blast-radius coverage now spans **all 22 supported languages and 14 web frameworks**, each validated on a real-world repo — see the new coverage table in the README. This release ships the cross-file resolution behind it, including Lua and Luau `require`, Shopify OS 2.0 Liquid section templates, Delphi form code-behind, Rust cross-module calls and Rocket route macros, Swift Fluent relationships, and the SvelteKit / Nuxt / Vapor / Axum route conventions. The residual everywhere is genuine static-analysis frontiers (runtime dispatch, reflection / DI, framework-convention entry points), never hidden.
@@ -117,8 +120,6 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.9.7] - 2026-05-28
 
-## [0.9.7] - 2026-05-28
-
 ### New Features
 
 - Go: gRPC interface stubs now connect to their hand-written implementation, so callers, callees, impact, and trace land on the real method instead of an empty generated stub.
@@ -134,9 +135,6 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - MCP tool descriptions are now shorter, trimming per-session overhead while keeping the steering guidance.
 - Java and Kotlin imports now resolve by fully-qualified name, so same-name classes in different packages are told apart correctly in multi-module Spring and Android codebases, including across the Java/Kotlin interop boundary.
 - Java and C# anonymous classes (`new T() { ... }`) and their overridden methods are now indexed as real class nodes, so an agent sees those hidden overrides in its trail without a Read.
-- **GitHub Copilot support** — `codegraph install` now configures two new agent targets out of the box:
-  - **`copilot-vscode`** (project-local): writes `./.vscode/mcp.json` with the VS Code MCP shape (top-level `servers` key) and a marker-delimited section in `./.github/copilot-instructions.md`. JSONC-aware via `jsonc-parser`.
-  - **`copilot-cli`** (global only): writes `~/.copilot/mcp-config.json` with the CLI's `mcpServers` shape, plus an explicit `tools` allowlist.
 - The installer no longer writes a duplicate `## CodeGraph` instructions block into your agent's instructions file (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, Cursor's `.cursor/rules/codegraph.mdc`, or Kiro's steering doc) — the MCP server is now the single source of truth, and re-running `codegraph install` or `codegraph uninstall` strips a block a previous version left behind (#529). If you added your own notes inside the `CODEGRAPH_START`/`CODEGRAPH_END` markers, move them outside the markers first, since the whole marked block is removed.
 
 ### Fixes
@@ -144,4 +142,3 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - MCP tools no longer return results for files that were deleted while no server was running — the first query of a session now waits for the catch-up sync, so you get the correct index instead of stale rows.
 - Windows: black console windows no longer flash on every file save or MCP reconnect (#485, #510, #530).
 - `codegraph index` and `init -i` now report the true edge count in their summary, instead of undercounting by missing resolution and synthesizer edges.
-
