@@ -10,10 +10,10 @@
 #   - RELEASE_PAT       Fine-grained PAT (contents:write) used for git push
 #                       and PR creation. Re-uses the secret already wired
 #                       for release.yml.
-#   - COPILOT_CLI_PAT   Classic PAT with `copilot` scope. Read by the
-#                       Copilot CLI install/auth step. Required because
-#                       the default GITHUB_TOKEN cannot speak to the
-#                       Copilot LLM API.
+#   - COPILOT_CLI_PAT   Token accepted by Copilot CLI for LLM auth (fine-grained
+#                       PAT with "Copilot Requests" or a GitHub CLI OAuth token).
+#                       Passed as COPILOT_GITHUB_TOKEN and stripped from shell
+#                       tool environments.
 #
 # Runbook + auth instructions: docs/SYNC.md
 
@@ -214,7 +214,7 @@ jobs:
         if: steps.rebase.outputs.had_conflicts == 'true'
         env:
           COPILOT_MODEL: ${{ inputs.model || 'claude-sonnet-4.5' }}
-          GITHUB_TOKEN: ${{ secrets.COPILOT_CLI_PAT }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_CLI_PAT }}
         run: |
           # --allow-all     skip per-tool approvals (headless)
           # --no-ask-user   never prompt the human (we have none)
@@ -227,6 +227,8 @@ jobs:
             -p "$(cat /tmp/sync/copilot-resolve-prompt.md)" \
             --allow-all \
             --no-ask-user \
+            --disable-builtin-mcps \
+            --secret-env-vars=COPILOT_GITHUB_TOKEN \
             --model "${COPILOT_MODEL}" \
             --add-dir "$(pwd)"
           # Post-conditions. Any of these failing means the agent left the
