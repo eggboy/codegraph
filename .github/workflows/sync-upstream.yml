@@ -215,7 +215,6 @@ jobs:
         env:
           COPILOT_MODEL: ${{ inputs.model || 'claude-sonnet-4.5' }}
           GITHUB_TOKEN: ${{ secrets.COPILOT_CLI_PAT }}
-          GH_TOKEN: ${{ secrets.COPILOT_CLI_PAT }}
         run: |
           # --allow-all     skip per-tool approvals (headless)
           # --no-ask-user   never prompt the human (we have none)
