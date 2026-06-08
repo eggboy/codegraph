@@ -120,15 +120,19 @@ Mondays 09:00 UTC (or manual)
    mentions `copilot-cli` or `copilot-vscode` at least 30 times. Catches
    parameterized-test mis-slotting where the LLM might collapse Copilot
    cases into a single arm.
-8. **`CHANGELOG.md` `[Unreleased]` contains a GitHub Copilot bullet.**
-9. **`npm run build` succeeds.**
-10. **Targeted Copilot tests pass** (`vitest run installer-targets -t copilot`).
-11. **MCP initialize smoke test passes** (`vitest run mcp-initialize`).
-12. **Full vitest suite assertions pass.** Worker-pool crashes (V8 wasm
+8. **Diffstat guard.** All files where the fork diverges from the upstream
+   target must be in a known allowlist. Catches the LLM agent wandering
+   into unrelated code. Skipped gracefully when the upstream target ref
+   isn't available (local runs).
+9. **`CHANGELOG.md` `[Unreleased]` contains a GitHub Copilot bullet.**
+10. **`npm run build` succeeds.**
+11. **Targeted Copilot tests pass** (`vitest run installer-targets -t copilot`).
+12. **MCP initialize smoke test passes** (`vitest run mcp-initialize`).
+13. **Full vitest suite assertions pass.** Worker-pool crashes (V8 wasm
     compile bugs, OOM) are noted but don't count as failures.
-13. **`codegraph install --print-config copilot-cli`** emits 9 tools in
+14. **`codegraph install --print-config copilot-cli`** emits 9 tools in
     the allowlist.
-14. **`codegraph install --print-config copilot-vscode`** emits the VS
+15. **`codegraph install --print-config copilot-vscode`** emits the VS
     Code `servers` shape.
 
 If any of these fail, the workflow opens a PR labeled `auto-sync,

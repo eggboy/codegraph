@@ -194,7 +194,70 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 8. Build
+# 8. Diffstat guard — detect agent edits outside expected fork divergence
+# ---------------------------------------------------------------------------
+echo
+echo "==> Checking: no unexpected fork-vs-upstream file divergence"
+
+# The upstream target ref is set by the workflow. When running locally it may
+# not exist — skip gracefully.
+if git rev-parse "${UPSTREAM_TARGET_REF:-refs/remotes/upstream-sync/target}" >/dev/null 2>&1; then
+  _UP_REF="${UPSTREAM_TARGET_REF:-refs/remotes/upstream-sync/target}"
+
+  # Allowlist: glob patterns for files the fork is EXPECTED to differ from
+  # upstream. Anything outside this set is suspicious — the LLM agent likely
+  # wandered into unrelated code.
+  FORK_ALLOWLIST=(
+    '.github/workflows/sync-upstream.yml'
+    '.markdownlint-cli2.jsonc'
+    'CHANGELOG.md'
+    'README.md'
+    '__tests__/installer-targets.test.ts'
+    'docs/SYNC.md'
+    'package.json'
+    'package-lock.json'
+    'scripts/sync/*'
+    'src/installer/index.ts'
+    'src/installer/instructions-template.ts'
+    'src/installer/targets/copilot-cli.ts'
+    'src/installer/targets/copilot-vscode.ts'
+    'src/installer/targets/registry.ts'
+    'src/installer/targets/types.ts'
+    '.cursor/rules/codegraph.mdc'
+  )
+
+  # Get files where fork (HEAD) differs from upstream target.
+  DIVERGED_FILES=$(git diff --name-only "${_UP_REF}"..HEAD 2>/dev/null || true)
+  UNEXPECTED=""
+
+  for f in ${DIVERGED_FILES}; do
+    MATCHED=false
+    for pattern in "${FORK_ALLOWLIST[@]}"; do
+      # Use bash pattern matching (supports * glob).
+      # shellcheck disable=SC2053
+      if [[ "$f" == $pattern ]]; then
+        MATCHED=true
+        break
+      fi
+    done
+    if [ "${MATCHED}" = "false" ]; then
+      UNEXPECTED="${UNEXPECTED}    ${f}\n"
+    fi
+  done
+
+  if [ -n "${UNEXPECTED}" ]; then
+    fail "fork diverges from upstream in unexpected files — agent may have wandered:"
+    printf "%b" "${UNEXPECTED}" >&2
+  else
+    DIVERGE_COUNT=$(echo "${DIVERGED_FILES}" | grep -c . || true)
+    pass "all ${DIVERGE_COUNT} diverging files are in the fork allowlist"
+  fi
+else
+  info "upstream target ref not available — skipping diffstat guard (local run?)"
+fi
+
+# ---------------------------------------------------------------------------
+# 9. Build
 # ---------------------------------------------------------------------------
 echo
 echo "==> Running: npm run build (TypeScript compile + asset copy)"
@@ -206,7 +269,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 9. Targeted Copilot installer-contract tests
+# 10. Targeted Copilot installer-contract tests
 # ---------------------------------------------------------------------------
 echo
 echo "==> Running: targeted Copilot installer-contract tests"
@@ -218,7 +281,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 10. MCP initialize smoke (end-to-end-ish — catches semantic drift the unit
+# 11. MCP initialize smoke (end-to-end-ish — catches semantic drift the unit
 #     tests miss)
 # ---------------------------------------------------------------------------
 echo
@@ -231,7 +294,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 11. Full test suite (only if all the targeted checks above passed — saves
+# 12. Full test suite (only if all the targeted checks above passed — saves
 #     time on broken trees by surfacing focused failures first)
 # ---------------------------------------------------------------------------
 echo
@@ -284,7 +347,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 12. install --print-config smoke for both Copilot targets
+# 13. install --print-config smoke for both Copilot targets
 # ---------------------------------------------------------------------------
 echo
 echo "==> Running: codegraph install --print-config smoke (Copilot targets)"
