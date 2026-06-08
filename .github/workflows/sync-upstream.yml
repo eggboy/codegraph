@@ -336,13 +336,13 @@ jobs:
           NEEDS_PR: ${{ steps.rebase.outputs.needs_pr }}
           VERIFY_EXIT: ${{ steps.verify.outputs.verify_exit }}
         run: |
-          if [ "${VERIFY_EXIT}" = "0" ]; then
-            # Green verify → push straight to main, even after LLM conflict
-            # resolution. verify.sh already proves build + tests + fork
-            # contracts, so human review is unnecessary for passing syncs.
+          if [ "${VERIFY_EXIT}" = "0" ] && { [ "${HAD_CONFLICTS}" = "true" ] || [ "${NEEDS_PR}" != "true" ]; }; then
+            # Green verify → push straight to main for clean rebases and
+            # LLM-resolved conflicts. Rebase anomalies still open a PR even
+            # if verify passes, because the target may not have been applied.
             echo "mode=fast_forward" >> "$GITHUB_OUTPUT"
           else
-            # Red verify → open a PR for human intervention.
+            # Red verify or rebase anomaly → open a PR for human intervention.
             echo "mode=pull_request" >> "$GITHUB_OUTPUT"
           fi
 

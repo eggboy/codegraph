@@ -103,8 +103,9 @@ Mondays 09:00 UTC (or manual)
     │   See "What verify.sh checks" below.
     │
     └─ Outcome:
-       ├─ Green verify (clean or conflict-resolved) → git push --force-with-lease origin HEAD:main
-       └─ Red verify                                → push to sync/upstream/<sha>; open PR
+       ├─ Clean rebase + green verify             → git push --force-with-lease origin HEAD:main
+       ├─ Conflict-resolved rebase + green verify → git push --force-with-lease origin HEAD:main
+       └─ Red verify or rebase anomaly            → push to sync/upstream/<sha>; open PR
 ```
 
 ## What `verify.sh` checks
@@ -137,9 +138,9 @@ Mondays 09:00 UTC (or manual)
 
 If any of these fail, the workflow opens a PR labeled `auto-sync,
 needs-review, verify-failed` with the verify log in the PR body. The
-workflow never pushes to `main` under a failed verify. **When verify
-passes — even after LLM conflict resolution — the workflow pushes
-directly to `main` with no PR.**
+workflow never pushes to `main` under a failed verify or rebase
+anomaly. **When verify passes after a clean or LLM-resolved rebase, the
+workflow pushes directly to `main` with no PR.**
 
 ## When the auto-PR opens (verify failed)
 

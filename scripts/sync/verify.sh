@@ -41,6 +41,28 @@ EXPECTED_COPILOT_TOOL_COUNT=9
 # adding shared cases that don't mention Copilot, but flag a big drop.
 MIN_COPILOT_TEST_MENTIONS=30
 
+# Glob patterns for files the fork is expected to differ from upstream.
+# Anything outside this set is suspicious — the LLM agent likely wandered
+# into unrelated code during conflict resolution.
+FORK_DIFF_ALLOWLIST=(
+  '.github/workflows/sync-upstream.yml'
+  '.markdownlint-cli2.jsonc'
+  'CHANGELOG.md'
+  'README.md'
+  '__tests__/installer-targets.test.ts'
+  'docs/SYNC.md'
+  'package.json'
+  'package-lock.json'
+  'scripts/sync/*'
+  'src/installer/index.ts'
+  'src/installer/instructions-template.ts'
+  'src/installer/targets/copilot-cli.ts'
+  'src/installer/targets/copilot-vscode.ts'
+  'src/installer/targets/registry.ts'
+  'src/installer/targets/types.ts'
+  '.cursor/rules/codegraph.mdc'
+)
+
 echo "==> Repo: $(git config --get remote.origin.url 2>/dev/null || echo '<unknown>')"
 echo "==> HEAD: $(git rev-parse --short HEAD) ($(git log -1 --pretty=%s))"
 echo
@@ -204,35 +226,13 @@ echo "==> Checking: no unexpected fork-vs-upstream file divergence"
 if git rev-parse "${UPSTREAM_TARGET_REF:-refs/remotes/upstream-sync/target}" >/dev/null 2>&1; then
   _UP_REF="${UPSTREAM_TARGET_REF:-refs/remotes/upstream-sync/target}"
 
-  # Allowlist: glob patterns for files the fork is EXPECTED to differ from
-  # upstream. Anything outside this set is suspicious — the LLM agent likely
-  # wandered into unrelated code.
-  FORK_ALLOWLIST=(
-    '.github/workflows/sync-upstream.yml'
-    '.markdownlint-cli2.jsonc'
-    'CHANGELOG.md'
-    'README.md'
-    '__tests__/installer-targets.test.ts'
-    'docs/SYNC.md'
-    'package.json'
-    'package-lock.json'
-    'scripts/sync/*'
-    'src/installer/index.ts'
-    'src/installer/instructions-template.ts'
-    'src/installer/targets/copilot-cli.ts'
-    'src/installer/targets/copilot-vscode.ts'
-    'src/installer/targets/registry.ts'
-    'src/installer/targets/types.ts'
-    '.cursor/rules/codegraph.mdc'
-  )
-
   # Get files where fork (HEAD) differs from upstream target.
   DIVERGED_FILES=$(git diff --name-only "${_UP_REF}"..HEAD 2>/dev/null || true)
   UNEXPECTED=""
 
   for f in ${DIVERGED_FILES}; do
     MATCHED=false
-    for pattern in "${FORK_ALLOWLIST[@]}"; do
+    for pattern in "${FORK_DIFF_ALLOWLIST[@]}"; do
       # Use bash pattern matching (supports * glob).
       # shellcheck disable=SC2053
       if [[ "$f" == $pattern ]]; then
