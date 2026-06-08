@@ -4,7 +4,8 @@
 # weekly cadence. When the rebase is clean → push directly. When upstream
 # touched anything the fork also touched → invoke GitHub Copilot CLI to
 # resolve the conflicts headless, then re-prove correctness via
-# scripts/sync/verify.sh and open a PR for human review.
+# scripts/sync/verify.sh. If verify passes → push directly (no PR needed).
+# A PR is only opened when verify fails, requiring human intervention.
 #
 # Required repo secrets:
 #   - RELEASE_PAT       Fine-grained PAT (contents:write) used for git push
@@ -335,11 +336,13 @@ jobs:
           NEEDS_PR: ${{ steps.rebase.outputs.needs_pr }}
           VERIFY_EXIT: ${{ steps.verify.outputs.verify_exit }}
         run: |
-          if [ "${HAD_CONFLICTS}" = "false" ] && [ "${NEEDS_PR}" != "true" ] && [ "${VERIFY_EXIT}" = "0" ]; then
-            # Clean rebase + no anomaly + green verify → push straight to main.
+          if [ "${VERIFY_EXIT}" = "0" ]; then
+            # Green verify → push straight to main, even after LLM conflict
+            # resolution. verify.sh already proves build + tests + fork
+            # contracts, so human review is unnecessary for passing syncs.
             echo "mode=fast_forward" >> "$GITHUB_OUTPUT"
           else
-            # Any LLM touch, any rebase anomaly, or any red verify opens a PR.
+            # Red verify → open a PR for human intervention.
             echo "mode=pull_request" >> "$GITHUB_OUTPUT"
           fi
 
