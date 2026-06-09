@@ -12,7 +12,12 @@ opens.
 
 ## TL;DR
 
-- **Cadence:** Monday 09:00 UTC (cron), plus manual dispatch.
+- **Cadence:** every 2 days at 09:00 UTC (cron), plus manual dispatch.
+- **Cooldown:** upstream commits younger than **7 days** are held back. The
+  sync target is the newest upstream commit that has already aged past the
+  window, so a freshly-landed upstream regression has time to be reverted
+  upstream before it ever reaches the fork. Tune via the `cooldown_days`
+  dispatch input (`0` disables it).
 - **Resolution:** GitHub Copilot CLI (`gpt-5.5`) reads
   `scripts/sync/copilot-resolve-prompt.md` and resolves conflicts headless.
 - **Safety net:** `scripts/sync/verify.sh` runs after every rebase
@@ -71,10 +76,12 @@ the workflow rebases and reports the outcome on GitHub Step Summary.
 ## How it works
 
 ```
-Mondays 09:00 UTC (or manual)
+Every 2 days 09:00 UTC (or manual)
     │
     ├─ Checkout fork (full history, no persisted credentials)
     ├─ git fetch selected upstream ref (main by default)
+    ├─ Cooldown: pick the newest fetched commit older than cooldown_days (7) as the target;
+    │      hold back anything younger. If nothing has aged past the window → exit (nothing to do)
     ├─ If the upstream target is already an ancestor of HEAD → exit (nothing to do)
     ├─ If an open auto-sync PR already targets this upstream HEAD SHA → exit (loop guard)
     ├─ npm ci
@@ -207,7 +214,13 @@ bash scripts/sync/verify.sh
 
 ## Tuning
 
-- **Cadence.** Edit the `cron:` line. Current: Monday 09:00 UTC.
+- **Cadence.** Edit the `cron:` line. Current: every 2 days at 09:00 UTC.
+- **Cooldown window.** Default 7 days. Override per-run via the
+  `cooldown_days` `workflow_dispatch` input (`0` disables the cooldown and
+  syncs the fetched tip directly). To change the default for the scheduled
+  run, edit the `inputs.cooldown_days || '7'` fallback in the
+  `Add upstream remote and fetch` step of
+  `.github/workflows/sync-upstream.yml`.
 - **Model.** Default `gpt-5.5`. Override per-run via the
   `workflow_dispatch` input if you need to test another model.
 - **Copilot CLI version.** Edit `COPILOT_CLI_VERSION` in

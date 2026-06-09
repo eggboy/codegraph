@@ -1,7 +1,11 @@
 # Automated upstream-sync workflow for the GHCP fork.
 #
 # Pulls a selected colbymchenry/codegraph upstream ref into eggboy/codegraph main on a
-# weekly cadence. When the rebase is clean → push directly. When upstream
+# 2-day cadence. A COOLDOWN window holds back upstream commits younger than
+# COOLDOWN_DAYS (default 7): the sync target is the newest upstream commit
+# that has already aged past the window, so a freshly-landed upstream
+# regression has time to be reverted upstream before it ever reaches the
+# fork. When the rebase is clean → push directly. When upstream
 # touched anything the fork also touched → invoke GitHub Copilot CLI to
 # resolve the conflicts headless, then re-prove correctness via
 # scripts/sync/verify.sh. If verify passes → push directly (no PR needed).
@@ -22,9 +26,10 @@ name: Sync upstream
 
 on:
   schedule:
-    # Mondays 09:00 UTC. Picks up the prior week's upstream work without
-    # competing with the maintainer's first-thing-Monday review window.
-    - cron: '0 9 * * 1'
+    # Every 2 days at 09:00 UTC. The 7-day cooldown still governs which
+    # upstream commits are eligible, so the tighter cadence just lets work
+    # land sooner once it has aged past the window.
+    - cron: '0 9 */2 * *'
   workflow_dispatch:
     inputs:
       force:
@@ -39,6 +44,10 @@ on:
         description: 'Upstream branch/tag/SHA to sync (defaults to main; use v0.9.7 for incremental testing)'
         type: string
         default: main
+      cooldown_days:
+        description: 'Hold back upstream commits younger than this many days (cooldown window). 0 disables the cooldown.'
+        type: string
+        default: '7'
 
 concurrency:
   group: sync-upstream
@@ -89,6 +98,7 @@ jobs:
         id: fetch
         env:
           REQUESTED_UPSTREAM_REF: ${{ inputs.upstream_ref || 'main' }}
+          COOLDOWN_DAYS: ${{ inputs.cooldown_days || '7' }}
         run: |
           if [[ "${REQUESTED_UPSTREAM_REF}" == -* ]]; then
             echo "::error::Invalid upstream ref '${REQUESTED_UPSTREAM_REF}'. Ref names must not start with dash."
@@ -98,23 +108,58 @@ jobs:
             echo "::error::Invalid upstream ref '${REQUESTED_UPSTREAM_REF}'. Ref names may only contain letters, numbers, dot, underscore, slash, and dash."
             exit 1
           fi
+          if ! [[ "${COOLDOWN_DAYS}" =~ ^[0-9]{1,4}$ ]]; then
+            echo "::error::Invalid cooldown_days '${COOLDOWN_DAYS}'. Must be a non-negative integer (number of days)."
+            exit 1
+          fi
           git remote add upstream "${UPSTREAM_REMOTE_URL}"
           git fetch upstream "${REQUESTED_UPSTREAM_REF}" --no-tags
-          git update-ref "${UPSTREAM_TARGET_REF}" FETCH_HEAD
+          FETCHED_SHA=$(git rev-parse FETCH_HEAD)
+          FETCHED_SHORT=$(git rev-parse --short=12 FETCH_HEAD)
+          # Cooldown gate. The sync target is the newest commit reachable from
+          # the fetched tip whose commit date is at or before the cutoff, so
+          # upstream commits younger than COOLDOWN_DAYS are held back. This
+          # gives an upstream regression time to be reverted upstream before
+          # it lands on the fork. COOLDOWN_DAYS=0 collapses to "everything",
+          # i.e. the fetched tip itself.
+          CUTOFF="${COOLDOWN_DAYS} days ago"
+          COOLDOWN_SHA=$(git rev-list -1 --before="${CUTOFF}" "${FETCHED_SHA}" || true)
+          if [ -z "${COOLDOWN_SHA}" ]; then
+            echo "No commit on '${REQUESTED_UPSTREAM_REF}' (tip ${FETCHED_SHORT}) is older than ${COOLDOWN_DAYS} day(s). Nothing has cleared the cooldown window yet."
+            {
+              echo "upstream_ref=${REQUESTED_UPSTREAM_REF}"
+              echo "upstream_sha=${FETCHED_SHA}"
+              echo "upstream_short=${FETCHED_SHORT}"
+              echo "cooldown_days=${COOLDOWN_DAYS}"
+              echo "cooldown_empty=true"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git update-ref "${UPSTREAM_TARGET_REF}" "${COOLDOWN_SHA}"
           UPSTREAM_SHA=$(git rev-parse "${UPSTREAM_TARGET_REF}")
           UPSTREAM_SHORT=$(git rev-parse --short=12 "${UPSTREAM_TARGET_REF}")
+          HELD=$(git rev-list --count "${COOLDOWN_SHA}..${FETCHED_SHA}")
           {
             echo "upstream_ref=${REQUESTED_UPSTREAM_REF}"
             echo "upstream_sha=${UPSTREAM_SHA}"
             echo "upstream_short=${UPSTREAM_SHORT}"
+            echo "cooldown_days=${COOLDOWN_DAYS}"
+            echo "cooldown_empty=false"
           } >> "$GITHUB_OUTPUT"
-          echo "Upstream ${REQUESTED_UPSTREAM_REF}: ${UPSTREAM_SHORT}"
+          echo "Upstream ${REQUESTED_UPSTREAM_REF} tip: ${FETCHED_SHORT}"
+          echo "Cooldown (${COOLDOWN_DAYS}d) target: ${UPSTREAM_SHORT} — holding back ${HELD} commit(s) younger than ${COOLDOWN_DAYS} day(s)."
 
       - name: Skip if already at upstream target
         id: ancestry
         env:
           UPSTREAM_SHA: ${{ steps.fetch.outputs.upstream_sha }}
+          COOLDOWN_EMPTY: ${{ steps.fetch.outputs.cooldown_empty }}
         run: |
+          if [ "${COOLDOWN_EMPTY}" = "true" ]; then
+            echo "No upstream commit has cleared the cooldown window yet — nothing to sync."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if git merge-base --is-ancestor "${UPSTREAM_SHA}" HEAD; then
             echo "Fork already contains upstream target — nothing to sync."
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -493,6 +538,8 @@ jobs:
         if: always()
         env:
           ANCESTRY_SKIP: ${{ steps.ancestry.outputs.skip }}
+          COOLDOWN_DAYS: ${{ steps.fetch.outputs.cooldown_days }}
+          COOLDOWN_EMPTY: ${{ steps.fetch.outputs.cooldown_empty }}
           HAD_CONFLICTS: ${{ steps.rebase.outputs.had_conflicts }}
           LOOP_GUARD_SKIP: ${{ steps.loop_guard.outputs.skip }}
           OUTCOME_MODE: ${{ steps.outcome.outputs.mode }}
@@ -503,6 +550,8 @@ jobs:
             echo "# Upstream sync summary"
             echo
             echo "- Upstream target: \`${UPSTREAM_SHORT}\`"
+            echo "- Cooldown window: \`${COOLDOWN_DAYS:-7}\` day(s)"
+            echo "- Nothing past cooldown: \`${COOLDOWN_EMPTY:-false}\`"
             echo "- Already at upstream: \`${ANCESTRY_SKIP}\`"
             echo "- Open-PR loop guard hit: \`${LOOP_GUARD_SKIP}\`"
             echo "- Had conflicts: \`${HAD_CONFLICTS}\`"
